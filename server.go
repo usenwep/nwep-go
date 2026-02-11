@@ -386,7 +386,9 @@ func (s *Server) NotifyWithOptions(peerNodeID NodeID, event, path string, body [
 	notify.path = cpath
 	notify.path_len = C.size_t(len(path))
 	if len(body) > 0 {
-		notify.body = (*C.uint8_t)(unsafe.Pointer(&body[0]))
+		cbody := C.CBytes(body)
+		allocs = append(allocs, cbody)
+		notify.body = (*C.uint8_t)(cbody)
 		notify.body_len = C.size_t(len(body))
 	}
 
@@ -402,7 +404,11 @@ func (s *Server) NotifyWithOptions(peerNodeID NodeID, event, path string, body [
 				cheaders[i].value = (*C.uint8_t)(unsafe.Pointer(cval))
 				cheaders[i].value_len = C.size_t(len(h.Value))
 			}
-			notify.headers = (*C.nwep_header)(unsafe.Pointer(&cheaders[0]))
+			hdrSize := C.size_t(len(cheaders)) * C.size_t(unsafe.Sizeof(C.nwep_header{}))
+			chdrs := (*C.nwep_header)(C.malloc(hdrSize))
+			allocs = append(allocs, unsafe.Pointer(chdrs))
+			C.memcpy(unsafe.Pointer(chdrs), unsafe.Pointer(&cheaders[0]), hdrSize)
+			notify.headers = chdrs
 			notify.header_count = C.size_t(len(cheaders))
 		}
 		var zeroID [16]byte
