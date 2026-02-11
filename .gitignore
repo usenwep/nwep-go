@@ -1,2 +1,4 @@
 third_party/
 *.key
+test-client
+test-server
