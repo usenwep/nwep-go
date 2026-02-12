@@ -30,7 +30,7 @@ const (
 	ProtoVer    = "WEB/1"
 	ALPN        = "WEB/1"
 	ALPNLen     = 5
-	DefaultPort = 4433
+	DefaultPort = 6937
 )
 
 const (

@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	nwep "nwep-go"
+	nwep "github.com/usenwep/nwep-go"
 )
 
 const defaultKeyFile = "server.key"

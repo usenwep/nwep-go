@@ -5,12 +5,12 @@ import (
 	"log"
 	"os"
 
-	nwep "nwep-go"
+	nwep "github.com/usenwep/nwep-go"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: test-client <web://url>\n")
+		fmt.Fprintf(os.Stderr, "usage: test-client <web://url/path>\n")
 		os.Exit(1)
 	}
 	url := os.Args[1]
@@ -21,6 +21,15 @@ func main() {
 
 	nwep.SetLogLevel(nwep.LogWarn)
 	nwep.SetLogStderr(true)
+
+	parsed, err := nwep.URLParse(url)
+	if err != nil {
+		log.Fatal("parse url:", err)
+	}
+	path := parsed.Path
+	if path == "" {
+		path = "/"
+	}
 
 	kp, err := nwep.GenerateKeypair()
 	if err != nil {
@@ -37,7 +46,7 @@ func main() {
 		log.Fatal("connect:", err)
 	}
 
-	resp, err := client.Get("/hello")
+	resp, err := client.Get(path)
 	if err != nil {
 		log.Fatal("get:", err)
 	}
