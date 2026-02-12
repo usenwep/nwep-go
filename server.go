@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/cgo"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -61,6 +62,11 @@ func (c *Conn) PeerIdentity() (pubkey [32]byte, nodeid NodeID) {
 	}
 	C.memcpy(unsafe.Pointer(&pubkey[0]), unsafe.Pointer(&peer.pubkey[0]), 32)
 	nodeid = nodeIDFromC(&peer.nodeid)
+	if nodeid.IsZero() {
+		if derived, err := NodeIDFromPubkey(pubkey); err == nil {
+			nodeid = derived
+		}
+	}
 	return
 }
 
@@ -118,6 +124,9 @@ type Server struct {
 	onConnect    func(*Conn)
 	onDisconnect func(*Conn, int)
 	userSettings *Settings
+
+	logServer    *LogServer
+	anchorServer *AnchorServer
 
 	events   chan protocolEvent
 	shutdown chan struct{}
@@ -359,6 +368,11 @@ func (s *Server) ConnectedPeers() []NodeID {
 	return peers
 }
 
+func (s *Server) SetLogServer(ls *LogServer)       { s.logServer = ls }
+func (s *Server) SetAnchorServer(as *AnchorServer)  { s.anchorServer = as }
+func (s *Server) LogServer() *LogServer              { return s.logServer }
+func (s *Server) AnchorServer() *AnchorServer        { return s.anchorServer }
+
 type NotifyOptions struct {
 	Headers  []Header
 	NotifyID [16]byte
@@ -505,10 +519,45 @@ func goServerOnDisconnect(conn *C.nwep_conn, errCode C.int, userData unsafe.Poin
 func goServerOnRequest(conn *C.nwep_conn, stream *C.nwep_stream, req *C.nwep_request, userData unsafe.Pointer) C.int {
 	srv := cgo.Handle(userData).Value().(*Server)
 
+	// Intercept requests destined for LogServer or AnchorServer.
+	// The C handle_request functions call nwep_stream_respond but do NOT
+	// end the stream, so we must call nwep_stream_end after success.
+	if srv.logServer != nil || srv.anchorServer != nil {
+		var path string
+		if req.path != nil {
+			path = C.GoStringN(req.path, C.int(req.path_len))
+		}
+		if srv.logServer != nil && (path == "/log" || strings.HasPrefix(path, "/log/")) {
+			if err := srv.logServer.HandleRequest(stream, req); err != nil {
+				w := &ResponseWriter{stream: stream}
+				w.Respond("internal_error", []byte(err.Error()))
+			} else {
+				C.nwep_stream_end(stream)
+			}
+			return 0
+		}
+		if srv.anchorServer != nil && (path == "/checkpoint" || strings.HasPrefix(path, "/checkpoint/")) {
+			if err := srv.anchorServer.HandleRequest(stream, req); err != nil {
+				w := &ResponseWriter{stream: stream}
+				w.Respond("internal_error", []byte(err.Error()))
+			} else {
+				C.nwep_stream_end(stream)
+			}
+			return 0
+		}
+	}
+
 	peer := C.nwep_conn_get_peer_identity(conn)
 	var goConn *Conn
 	if peer != nil {
 		nid := nodeIDFromC(&peer.nodeid)
+		if nid.IsZero() {
+			var pubkey [32]byte
+			C.memcpy(unsafe.Pointer(&pubkey[0]), unsafe.Pointer(&peer.pubkey[0]), 32)
+			if derived, err := NodeIDFromPubkey(pubkey); err == nil {
+				nid = derived
+			}
+		}
 		srv.connsMu.Lock()
 		goConn = srv.conns[nid.String()]
 		srv.connsMu.Unlock()

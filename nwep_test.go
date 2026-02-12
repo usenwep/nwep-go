@@ -1540,3 +1540,491 @@ func TestLargeBody(t *testing.T) {
 		t.Fatalf("body length = %d, want %d", len(resp.Body), len(body))
 	}
 }
+
+func TestServerLogServerIntercept(t *testing.T) {
+	serverKP, err := GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverKP.Clear()
+
+	storage := &memLogStorage{}
+	ml, err := NewMerkleLog(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ml.Free()
+
+	entry := makeTestEntry(t)
+	idx, err := ml.Append(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("appended entry at index %d", idx)
+
+	ls, err := NewLogServer(ml, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ls.Free()
+
+	router := NewRouter()
+	router.HandleFunc("/hello", func(w *ResponseWriter, r *Request) {
+		w.Respond("ok", []byte("hello"))
+	})
+
+	srv, err := NewServer(":0", serverKP, router)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetLogServer(ls)
+
+	go srv.Run()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	clientKP, _ := GenerateKeypair()
+	defer clientKP.Clear()
+	client, err := NewClient(clientKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Connect(srv.URL("/")); err != nil {
+		t.Fatal("connect:", err)
+	}
+	defer client.Close()
+
+	if srv.LogServer() != ls {
+		t.Fatal("LogServer() should return the set instance")
+	}
+	if srv.AnchorServer() != nil {
+		t.Fatal("AnchorServer() should be nil")
+	}
+
+	t.Run("GET /log/size", func(t *testing.T) {
+		resp, err := client.Get("/log/size")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("status=%s body=%s", resp.Status, string(resp.Body))
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q, want ok", resp.Status)
+		}
+		if len(resp.Body) == 0 {
+			t.Fatal("expected non-empty body with log size")
+		}
+	})
+
+	t.Run("GET /log/entry/0", func(t *testing.T) {
+		resp, err := client.Get("/log/entry/0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("status=%s bodyLen=%d", resp.Status, len(resp.Body))
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q, want ok", resp.Status)
+		}
+		if len(resp.Body) == 0 {
+			t.Fatal("expected entry body")
+		}
+		decoded, err := MerkleEntryDecode(resp.Body)
+		if err != nil {
+			t.Fatal("decode entry:", err)
+		}
+		if decoded.NodeID != entry.NodeID {
+			t.Fatalf("decoded NodeID = %s, want %s", decoded.NodeID, entry.NodeID)
+		}
+	})
+
+	t.Run("GET /log/proof/0", func(t *testing.T) {
+		resp, err := client.Get("/log/proof/0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("status=%s bodyLen=%d", resp.Status, len(resp.Body))
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q, want ok", resp.Status)
+		}
+		if len(resp.Body) == 0 {
+			t.Fatal("expected proof body")
+		}
+	})
+
+	t.Run("GET /hello still works", func(t *testing.T) {
+		resp, err := client.Get("/hello")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "ok" || string(resp.Body) != "hello" {
+			t.Fatalf("status=%q body=%q, want ok/hello", resp.Status, resp.Body)
+		}
+	})
+
+	t.Run("GET /logother -> not_found", func(t *testing.T) {
+		resp, err := client.Get("/logother")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "not_found" {
+			t.Fatalf("status = %q, want not_found", resp.Status)
+		}
+	})
+}
+
+func TestServerAnchorServerIntercept(t *testing.T) {
+	serverKP, err := GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverKP.Clear()
+
+	blsKP, err := BLSKeypairGenerate()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	anchorSet, err := NewAnchorSet(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer anchorSet.Free()
+
+	if err := anchorSet.Add(blsKP.Pubkey(), true); err != nil {
+		t.Fatal(err)
+	}
+
+	as, err := NewAnchorServer(blsKP, anchorSet, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer as.Free()
+
+	storage := &memLogStorage{}
+	ml, err := NewMerkleLog(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ml.Free()
+
+	entry := makeTestEntry(t)
+	ml.Append(entry)
+	root, _ := ml.Root()
+
+	cp, err := CheckpointNew(1, uint64(time.Now().UnixNano()), root, ml.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckpointSign(cp, blsKP); err != nil {
+		t.Fatal(err)
+	}
+	if err := as.AddCheckpoint(cp); err != nil {
+		t.Fatal(err)
+	}
+
+	router := NewRouter()
+	router.HandleFunc("/status", func(w *ResponseWriter, r *Request) {
+		w.Respond("ok", []byte("running"))
+	})
+
+	srv, err := NewServer(":0", serverKP, router)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetAnchorServer(as)
+
+	go srv.Run()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	clientKP, _ := GenerateKeypair()
+	defer clientKP.Clear()
+	client, err := NewClient(clientKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Connect(srv.URL("/")); err != nil {
+		t.Fatal("connect:", err)
+	}
+	defer client.Close()
+
+	if srv.AnchorServer() != as {
+		t.Fatal("AnchorServer() should return the set instance")
+	}
+	if srv.LogServer() != nil {
+		t.Fatal("LogServer() should be nil")
+	}
+
+	t.Run("GET /checkpoint/latest", func(t *testing.T) {
+		resp, err := client.Get("/checkpoint/latest")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("status=%s bodyLen=%d", resp.Status, len(resp.Body))
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q, want ok", resp.Status)
+		}
+		if len(resp.Body) == 0 {
+			t.Fatal("expected checkpoint body")
+		}
+		decoded, err := CheckpointDecode(resp.Body)
+		if err != nil {
+			t.Fatal("decode checkpoint:", err)
+		}
+		if decoded.Epoch != 1 {
+			t.Fatalf("epoch = %d, want 1", decoded.Epoch)
+		}
+	})
+
+	t.Run("GET /checkpoint/1", func(t *testing.T) {
+		resp, err := client.Get("/checkpoint/1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("status=%s bodyLen=%d", resp.Status, len(resp.Body))
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q, want ok", resp.Status)
+		}
+	})
+
+	t.Run("GET /status still works", func(t *testing.T) {
+		resp, err := client.Get("/status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "ok" || string(resp.Body) != "running" {
+			t.Fatalf("status=%q body=%q, want ok/running", resp.Status, resp.Body)
+		}
+	})
+
+	t.Run("GET /checkpointother -> not_found", func(t *testing.T) {
+		resp, err := client.Get("/checkpointother")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "not_found" {
+			t.Fatalf("status = %q, want not_found", resp.Status)
+		}
+	})
+}
+
+func TestServerBothLogAndAnchorIntercept(t *testing.T) {
+	serverKP, err := GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverKP.Clear()
+
+	logStorage := &memLogStorage{}
+	ml, err := NewMerkleLog(logStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ml.Free()
+
+	entry := makeTestEntry(t)
+	ml.Append(entry)
+
+	ls, err := NewLogServer(ml, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ls.Free()
+
+	blsKP, err := BLSKeypairGenerate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchorSet, err := NewAnchorSet(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer anchorSet.Free()
+	anchorSet.Add(blsKP.Pubkey(), true)
+
+	as, err := NewAnchorServer(blsKP, anchorSet, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer as.Free()
+
+	root, _ := ml.Root()
+	cp, err := CheckpointNew(1, uint64(time.Now().UnixNano()), root, ml.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	CheckpointSign(cp, blsKP)
+	as.AddCheckpoint(cp)
+
+	router := NewRouter()
+	router.HandleFunc("/ping", func(w *ResponseWriter, r *Request) {
+		w.Respond("ok", []byte("pong"))
+	})
+
+	srv, err := NewServer(":0", serverKP, router)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetLogServer(ls)
+	srv.SetAnchorServer(as)
+
+	go srv.Run()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	clientKP, _ := GenerateKeypair()
+	defer clientKP.Clear()
+	client, err := NewClient(clientKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Connect(srv.URL("/")); err != nil {
+		t.Fatal("connect:", err)
+	}
+	defer client.Close()
+
+	t.Run("log/size", func(t *testing.T) {
+		resp, err := client.Get("/log/size")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q", resp.Status)
+		}
+	})
+
+	t.Run("log/entry/0", func(t *testing.T) {
+		resp, err := client.Get("/log/entry/0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q", resp.Status)
+		}
+	})
+
+	t.Run("checkpoint/latest", func(t *testing.T) {
+		resp, err := client.Get("/checkpoint/latest")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q", resp.Status)
+		}
+	})
+
+	t.Run("checkpoint/1", func(t *testing.T) {
+		resp, err := client.Get("/checkpoint/1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q", resp.Status)
+		}
+	})
+
+	t.Run("ping", func(t *testing.T) {
+		resp, err := client.Get("/ping")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "ok" || string(resp.Body) != "pong" {
+			t.Fatalf("status=%q body=%q", resp.Status, resp.Body)
+		}
+	})
+
+	t.Run("not_found", func(t *testing.T) {
+		resp, err := client.Get("/unknown")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "not_found" {
+			t.Fatalf("status = %q", resp.Status)
+		}
+	})
+}
+
+func TestServerLogServerWriteEntry(t *testing.T) {
+	serverKP, err := GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverKP.Clear()
+
+	storage := &memLogStorage{}
+	ml, err := NewMerkleLog(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ml.Free()
+
+	ls, err := NewLogServer(ml, &LogServerSettings{
+		Authorize: func(nodeid NodeID, entry *MerkleEntry) error {
+			return nil // allow all
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ls.Free()
+
+	srv, err := NewServer(":0", serverKP, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetLogServer(ls)
+
+	go srv.Run()
+	defer srv.Shutdown()
+	time.Sleep(50 * time.Millisecond)
+
+	clientKP, _ := GenerateKeypair()
+	defer clientKP.Clear()
+	client, err := NewClient(clientKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Connect(srv.URL("/")); err != nil {
+		t.Fatal("connect:", err)
+	}
+	defer client.Close()
+
+	t.Run("initial size is 0", func(t *testing.T) {
+		resp, err := client.Get("/log/size")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q", resp.Status)
+		}
+		t.Logf("initial size body: %x", resp.Body)
+	})
+
+	t.Run("write entry", func(t *testing.T) {
+		entry := makeTestEntry(t)
+		encoded, err := MerkleEntryEncode(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Post("/log/entry", encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("write status=%s bodyLen=%d", resp.Status, len(resp.Body))
+		if resp.Status != "ok" && resp.Status != "created" {
+			t.Fatalf("status = %q, want ok or created", resp.Status)
+		}
+	})
+
+	t.Run("read back entry", func(t *testing.T) {
+		resp, err := client.Get("/log/entry/0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status != "ok" {
+			t.Fatalf("status = %q", resp.Status)
+		}
+		if len(resp.Body) == 0 {
+			t.Fatal("expected entry body")
+		}
+	})
+}
