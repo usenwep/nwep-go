@@ -3,22 +3,44 @@ set -euo pipefail
 
 REPO="usenwep/nwep"
 
-# Detect OS
-case "$(uname -s)" in
-    Linux*)  OS="linux";;
-    Darwin*) OS="darwin";;
-    MINGW*|MSYS*|CYGWIN*) OS="windows";;
-    *) OS="$(uname -s | tr '[:upper:]' '[:lower:]')";;
-esac
+# Detect OS — respect GOOS when cross-compiling (e.g. GOOS=android).
+# Fall back to uname for native builds.
+if [ -n "${GOOS:-}" ]; then
+    case "${GOOS}" in
+        android) OS="android";;
+        linux)   OS="linux";;
+        darwin)  OS="darwin";;
+        windows) OS="windows";;
+        *)       OS="${GOOS}";;
+    esac
+else
+    case "$(uname -s)" in
+        Linux*)              OS="linux";;
+        Darwin*)             OS="darwin";;
+        MINGW*|MSYS*|CYGWIN*) OS="windows";;
+        *) OS="$(uname -s | tr '[:upper:]' '[:lower:]')";;
+    esac
+fi
 
-# Detect architecture
-case "$(uname -m)" in
-    x86_64|amd64)  ARCH="x86_64";;
-    aarch64|arm64) ARCH="aarch64";;
-    armv7*)        ARCH="arm";;
-    i686|i386)     ARCH="x86";;
-    *) ARCH="$(uname -m)";;
-esac
+# Detect architecture — respect GOARCH when cross-compiling.
+# Map Go arch names to the artifact naming convention.
+if [ -n "${GOARCH:-}" ]; then
+    case "${GOARCH}" in
+        arm64) ARCH="aarch64";;
+        arm)   ARCH="arm";;
+        amd64) ARCH="x86_64";;
+        386)   ARCH="x86";;
+        *)     ARCH="${GOARCH}";;
+    esac
+else
+    case "$(uname -m)" in
+        x86_64|amd64)  ARCH="x86_64";;
+        aarch64|arm64) ARCH="aarch64";;
+        armv7*)        ARCH="arm";;
+        i686|i386)     ARCH="x86";;
+        *) ARCH="$(uname -m)";;
+    esac
+fi
 
 # Fetch the latest release and find a matching asset
 echo "Fetching latest release from ${REPO}..."
