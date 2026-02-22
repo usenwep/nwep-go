@@ -4,10 +4,9 @@ package nwep
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/third_party/nwep/current/include -DNWEP_STATICLIB
-#cgo LDFLAGS: -L${SRCDIR}/third_party/nwep/current/lib -lnwep_packed
-#cgo linux LDFLAGS: -lpthread -ldl
-#cgo darwin LDFLAGS: -lpthread -ldl
-#cgo windows LDFLAGS: -lws2_32
+#cgo linux LDFLAGS: -L${SRCDIR}/third_party/nwep/current/lib -lnwep_packed -lpthread -ldl
+#cgo darwin LDFLAGS: -L${SRCDIR}/third_party/nwep/current/lib -lnwep_packed -lpthread -ldl
+#cgo windows LDFLAGS: -L${SRCDIR}/third_party/nwep/current/lib -l:nwep_packed.lib -lws2_32
 #include <nwep/nwep.h>
 #include <stdlib.h>
 #include <string.h>
