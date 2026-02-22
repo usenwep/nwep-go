@@ -1,6 +1,6 @@
 package nwep
 
-//go:generate ./setup.sh
+//go:generate go run internal/setup/setup.go
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/third_party/nwep/current/include -DNWEP_STATICLIB
